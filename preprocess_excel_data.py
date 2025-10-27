@@ -89,17 +89,17 @@ def load_and_preprocess_excel(input_path: str) -> pd.DataFrame:
     # mom20 (cumulative log return over 20d)
     df["mom20"] = grp["log_return"].transform(lambda s: s.rolling(20).sum())
     
-    # NaN 값 처리 및 2021-01-26 이후 데이터만 사용
+    # NaN 값 처리 및 2021-04-30 이후 데이터만 사용
     print(f"   [INFO] NaN 값 처리 전: {len(df)} 행")
     # 특성 컬럼(파생 지표)에 NaN이 있는 행 제거
     FEATURES = ["log_return", "vol_z", "volatility20", "mom20"]
     df = df.dropna(subset=FEATURES)
     print(f"   [INFO] NaN 제거 후: {len(df)} 행")
     
-    # 2021-01-26 이후 데이터만 사용
-    cutoff_date = pd.Timestamp("2021-01-26")
+    # 2021-04-30 이후 데이터만 사용
+    cutoff_date = pd.Timestamp("2021-04-30")
     df = df[df["date"] >= cutoff_date].copy()
-    print(f"   [INFO] 2021-01-26 이후: {len(df)} 행")
+    print(f"   [INFO] 2021-04-30 이후: {len(df)} 행")
     
     print("   [OK] 특성 엔지니어링 완료")
     print(f"\n[INFO] 최종 데이터:")

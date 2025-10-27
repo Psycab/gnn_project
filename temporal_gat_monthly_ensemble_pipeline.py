@@ -62,8 +62,29 @@ def month_end(ts: pd.Timestamp) -> pd.Timestamp:
 
 
 def get_month_ends(dts: List[pd.Timestamp]) -> List[pd.Timestamp]:
-    me = sorted(set([month_end(d) for d in dts]))
-    return me
+    """월말 영업일 추출 - 매월 마지막 영업일 기준 (2021-04-30 이후만)"""
+    import pandas as pd
+    
+    # 2021-04-30 이후 데이터만 사용
+    min_date = pd.Timestamp("2021-04-30")
+    filtered_dts = [d for d in dts if d >= min_date]
+    
+    if not filtered_dts:
+        return []
+    
+    # 각 월별로 마지막 날짜 찾기
+    df = pd.DataFrame(filtered_dts, columns=['date'])
+    df['year_month'] = df['date'].dt.to_period('M')
+    
+    month_ends = []
+    for period in df['year_month'].unique():
+        month_data = df[df['year_month'] == period]['date']
+        # 영업일만 필터링 (주말 제외)
+        business_days = month_data[month_data.dt.weekday < 5]
+        if len(business_days) > 0:
+            month_ends.append(business_days.max())
+    
+    return sorted(month_ends)
 
 
 def next_month_end(ts: pd.Timestamp) -> pd.Timestamp:
@@ -166,16 +187,16 @@ def load_and_engineer(data_path: str) -> pd.DataFrame:
     # mom20 (cumulative log return over 20d)
     df["mom20"] = grp["log_return"].transform(lambda s: s.rolling(20).sum())
 
-    # NaN 값 처리 및 2021-01-26 이후 데이터만 사용
+    # NaN 값 처리 및 2021-04-30 이후 데이터만 사용
     print(f"   [INFO] NaN 값 처리 전: {len(df)} 행")
     # 특성 컬럼(파생 지표)에 NaN이 있는 행 제거
     df = df.dropna(subset=FEATURES)
     print(f"   [INFO] NaN 제거 후: {len(df)} 행")
     
-    # 2021-01-26 이후 데이터만 사용
-    cutoff_date = pd.Timestamp("2021-01-26")
+    # 2021-04-30 이후 데이터만 사용
+    cutoff_date = pd.Timestamp("2021-04-30")
     df = df[df["date"] >= cutoff_date].copy()
-    print(f"   [INFO] 2021-01-26 이후: {len(df)} 행")
+    print(f"   [INFO] 2021-04-30 이후: {len(df)} 행")
     print(f"   [INFO] 날짜 범위: {df['date'].min()} ~ {df['date'].max()}")
 
     return df
