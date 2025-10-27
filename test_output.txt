@@ -1,0 +1,49 @@
+============================================================
+모델 학습 입력값-예측값 쌍 검증
+============================================================
+
+1. 데이터 로드...
+   Shape: (110580, 9)
+   Date range: 2021-01-26 00:00:00 ~ 2025-10-27 00:00:00
+   Symbols: 95 개
+
+2. 월말 날짜 추출: 58 개
+   첫 5개: [Timestamp('2021-01-31 00:00:00'), Timestamp('2021-02-28 00:00:00'), Timestamp('2021-03-31 00:00:00'), Timestamp('2021-04-30 00:00:00'), Timestamp('2021-05-31 00:00:00')]
+   마지막 5개: [Timestamp('2025-06-30 00:00:00'), Timestamp('2025-07-31 00:00:00'), Timestamp('2025-08-31 00:00:00'), Timestamp('2025-09-30 00:00:00'), Timestamp('2025-10-31 00:00:00')]
+
+3. 종목 수: 95
+
+4. 검증 대상 월말 (asof): 2021-11-30 00:00:00
+   다음 월말: 2021-12-31 00:00:00
+
+5. asof 시점 종목별 가격 (샘플 5개 종목):
+       symbol   close
+209   A000080   29000
+1373  A000100   50645
+2537  A000120  124000
+3701  A000150  108500
+4865  A000210   56000
+
+6. next_me 시점 종목별 가격 (샘플 5개 종목):
+Empty DataFrame
+Columns: [symbol, close]
+Index: []
+
+7. 레이블 생성 테스트:
+   레이블 분포: {0: np.int64(95)}
+
+8. 입력 윈도우 테스트 (T=20):
+   X shape: (95, 80)
+   mask (유효한 종목): 95 개
+   처음 3개 유효 종목: ['A000080', 'A000100', 'A000120']
+
+9. 샘플 종목 'A000080' 검증:
+   입력 윈도우: 2021-11-03 ~ 2021-11-30 (20 영업일)
+   입력 데이터: [-0.02894558  0.57886475  0.01619367  0.00146951 -0.00736923] (첫 5개 특성)
+   레이블: 0
+Traceback (most recent call last):
+  File "C:\Users\USER\PycharmProjects\gnn_project\test_train_data_pairs.py", line 108, in <module>
+    test_data_pairs()
+  File "C:\Users\USER\PycharmProjects\gnn_project\test_train_data_pairs.py", line 87, in test_data_pairs
+    fut_price = df[(df["date"] == next_me) & (df["symbol"] == sample_symbol)]["close"].values[0]
+IndexError: index 0 is out of bounds for axis 0 with size 0
