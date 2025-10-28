@@ -786,4 +786,5 @@ def main():
 
 
 if __name__ == "__main__":
+    # python temporal_gat_monthly_ensemble_pipeline_GPU_full.py --data preprocessed_data.xlsx --n-models 3 --epochs 100 --k-neighbors 3 --mutual-topk --drop-edge .15 --gat-hidden 64 --gat-heads 4 --gat-layers 2 --gat-drop 0.3 --neg-slope 0.2 --gru-layers 1 --gru-drop 0.0 --log-every 10
     main()
