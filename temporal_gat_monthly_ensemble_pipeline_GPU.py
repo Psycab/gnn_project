@@ -458,14 +458,14 @@ def make_model(T: int, seed: int) -> TemporalGATWrapper:
     return TemporalGATWrapper(T=T, hidden_dim=64, num_layers=2, num_heads=4, lr=1e-3, epochs=50, corr_threshold=0.3)
 
 def train_month_end_models(df: pd.DataFrame, asof: pd.Timestamp, save_dir: str, model_idx: int,
-                           n_models: int = 5) -> Dict[int, Optional[str]]:
-    """Train n_models seeds for each T in WINDOWS and save. Returns map T->path or None."""
+                           n_models: int = 5) -> Dict[int, List[str]]:
+    """Train n_models seeds for each T in WINDOWS and save all. Returns map T->list of paths."""
     ensure_dirs()
     os.makedirs(save_dir, exist_ok=True)
 
     symbols = sorted(df["symbol"].unique().tolist())
     symbol_groups = group_data_by_symbol(df)
-    saved: Dict[int, Optional[str]] = {T: None for T in WINDOWS}
+    saved: Dict[int, List[str]] = {T: [] for T in WINDOWS}
 
     for T in WINDOWS:
         print(f"  [INFO] asof 기준 T={T} 학습: {asof.date()}")
@@ -478,8 +478,7 @@ def train_month_end_models(df: pd.DataFrame, asof: pd.Timestamp, save_dir: str, 
         y_kept = y_full[mask]
         returns_kept = returns[mask]
 
-        # ensemble over seeds; save the last one (or best) — here we save last
-        last_path = None
+        # ensemble over seeds; save ALL models
         for i in range(n_models):
             seed = (model_idx * 1000) + (i + 1)
             print(f"    [모델 {i+1}/{n_models}] seed={seed}")
@@ -489,42 +488,54 @@ def train_month_end_models(df: pd.DataFrame, asof: pd.Timestamp, save_dir: str, 
             fname = f"T{T}_seed{seed}.joblib"
             fpath = os.path.join(save_dir, fname)
             joblib.dump(pack, fpath)
-            last_path = fpath
-        saved[T] = last_path
+            saved[T].append(fpath)  # 모든 모델 경로 저장
     return saved
 
 @torch.no_grad()
 def predict_with_ensemble(df: pd.DataFrame, asof: pd.Timestamp, predict_asof: pd.Timestamp,
-                          saved_map: Dict[int, Optional[str]]) -> Optional[np.ndarray]:
+                          saved_map: Dict[int, List[str]]) -> Optional[np.ndarray]:
+    """Load all models for each T and ensemble their predictions."""
     symbols = sorted(df["symbol"].unique().tolist())
     all_probas: List[np.ndarray] = []
 
     for T in WINDOWS:
-        model_path = saved_map.get(T)
-        if not model_path or not os.path.exists(model_path):
+        model_paths = saved_map.get(T, [])
+        if not model_paths:
             continue
-        pack = joblib.load(model_path, mmap_mode=None)
-        model: TemporalGATWrapper = pack["model"]
-        # map to current device and eval
-        model.device = DEVICE
-        if model.model is not None:
-            model.model.to(DEVICE)
-        # build inputs for this T
-        X_T, mask_T, kept_T, returns_T = build_window_matrix(df, symbols, predict_asof, T, FEATURES)
-        if not mask_T.any():
-            # no valid rows at this horizon; skip
-            continue
-        proba_kept = model.predict_proba(X_T[mask_T], returns_T[mask_T])
-        # scatter back to full N with NaNs -> later handled
-        proba_full = np.full((len(symbols), 3), np.nan, dtype=np.float32)
-        proba_full[mask_T] = proba_kept
-        all_probas.append(proba_full)
+        
+        # 각 T에 대해 모든 모델의 예측값 수집
+        probas_for_T = []
+        for model_path in model_paths:
+            if not os.path.exists(model_path):
+                continue
+            pack = joblib.load(model_path, mmap_mode=None)
+            model: TemporalGATWrapper = pack["model"]
+            # map to current device and eval
+            model.device = DEVICE
+            if model.model is not None:
+                model.model.to(DEVICE)
+            
+            # build inputs for this T
+            X_T, mask_T, kept_T, returns_T = build_window_matrix(df, symbols, predict_asof, T, FEATURES)
+            if not mask_T.any():
+                continue
+            proba_kept = model.predict_proba(X_T[mask_T], returns_T[mask_T])
+            # scatter back to full N with NaNs
+            proba_full = np.full((len(symbols), 3), np.nan, dtype=np.float32)
+            proba_full[mask_T] = proba_kept
+            probas_for_T.append(proba_full)
+        
+        # 해당 T의 모든 모델 예측값 평균
+        if probas_for_T:
+            avg_for_T = np.nanmean(np.stack(probas_for_T, axis=0), axis=0)
+            all_probas.append(avg_for_T)
 
     if not all_probas:
         return None
 
-    avg_proba = np.nanmean(np.stack(all_probas, axis=0), axis=0)  # [N,3]
-    pred = np.nanargmax(avg_proba, axis=1)
+    # T=20, 40, 60의 평균을 다시 평균
+    final_avg = np.nanmean(np.stack(all_probas, axis=0), axis=0)  # [N,3]
+    pred = np.nanargmax(final_avg, axis=1)
     return pred
 
 

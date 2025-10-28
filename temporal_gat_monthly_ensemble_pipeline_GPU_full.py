@@ -269,8 +269,8 @@ def build_label_vector(df: pd.DataFrame, symbols: List[str], asof: pd.Timestamp)
         df[df["date"] == future_date][["symbol", "close"]].set_index("symbol").reindex(symbols)["close"]
     )
     rel = (fut / base - 1.0).astype(float)
-    y[(rel >= 0.05) & (rel < 0.10)] = 1
-    y[rel >= 0.10] = 2
+    y[(rel >= 0.00) & (rel < 0.05)] = 1
+    y[rel >= 0.05] = 2
     return y
 
 # ============================== Model Layers =============================== #
