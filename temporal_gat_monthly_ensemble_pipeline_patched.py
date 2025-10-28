@@ -44,6 +44,50 @@ from sklearn.preprocessing import StandardScaler
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 
+# === Patched: Use Excel trading calendar (actual KRX trading days) ===
+TRADING_CAL: pd.DatetimeIndex | None = None
+
+def set_trading_calendar_from_df(df: pd.DataFrame) -> None:
+    """df['date']로부터 전역 TRADING_CAL(실제 거래일 캘린더) 생성"""
+    global TRADING_CAL
+
+    # 1) 가장 견고한 변환: 모두 UTC로 파싱 → 로컬 naive로 변환 → 자정 정규화
+    dates = pd.to_datetime(df["date"], errors="coerce", utc=True) \
+                .dt.tz_convert(None) \
+                .dt.normalize()
+
+    # 2) (선택) 엑셀 일련번호(예: 44561)만 섞인 특수 케이스까지 잡고 싶으면:
+    if dates.isna().mean() > 0.8 and pd.api.types.is_numeric_dtype(df["date"]):
+        dates = pd.to_datetime(df["date"].astype("float64"),
+                               unit="d", origin="1899-12-30",
+                               errors="coerce").dt.normalize()
+
+    cal = pd.DatetimeIndex(dates.dropna().unique()).sort_values()
+    TRADING_CAL = cal
+
+def snap_to_calendar(asof: pd.Timestamp, cal: pd.DatetimeIndex) -> pd.Timestamp | None:
+    """If asof not in calendar, snap to the previous trading day."""
+    if cal is None or len(cal) == 0:
+        return None
+    asof = pd.Timestamp(asof).tz_localize(None).normalize()
+    pos = cal.searchsorted(asof, side="right") - 1
+    if pos < 0:
+        return None
+    return cal[pos]
+
+def last_n_trading_days(asof: pd.Timestamp, n: int, cal: pd.DatetimeIndex) -> pd.DatetimeIndex | None:
+    if cal is None or len(cal) == 0:
+        return None
+    a = snap_to_calendar(asof, cal)
+    if a is None:
+        return None
+    pos = cal.get_indexer([a])[0]
+    start = pos - (n - 1)
+    if start < 0:
+        return None
+    return cal[start:pos+1]
+# === End Patch Header ===
+
 # Numba for JIT compilation
 NUMBA_AVAILABLE = False
 try:
@@ -77,34 +121,38 @@ def month_end(ts: pd.Timestamp) -> pd.Timestamp:
     return ts.to_period("M").to_timestamp("M")
 
 
-def get_month_ends(dts: List[pd.Timestamp]) -> List[pd.Timestamp]:
-    """월말 영업일 추출 - 매월 마지막 영업일 기준 (2021-04-30 이후만)"""
-    import pandas as pd
-    
-    # 2021-04-30 이후 데이터만 사용
-    min_date = pd.Timestamp("2021-04-30")
-    filtered_dts = [d for d in dts if d >= min_date]
-    
-    if not filtered_dts:
+def get_month_ends(cal: pd.DatetimeIndex) -> list[pd.Timestamp]:
+    if cal is None or len(cal) == 0:
         return []
-    
-    # 각 월별로 마지막 날짜 찾기
-    df = pd.DataFrame(filtered_dts, columns=['date'])
-    df['year_month'] = df['date'].dt.to_period('M')
-    
-    month_ends = []
-    for period in df['year_month'].unique():
-        month_data = df[df['year_month'] == period]['date']
-        # 영업일만 필터링 (주말 제외)
-        business_days = month_data[month_data.dt.weekday < 5]
-        if len(business_days) > 0:
-            month_ends.append(business_days.max())
-    
-    return sorted(month_ends)
+    per = cal.to_period("M")
+    s = pd.Series(cal, index=per)
+    month_ends = s.groupby(level=0).max()
+    month_ends = month_ends[month_ends >= pd.Timestamp("2021-04-30")]
+    return month_ends.tolist()
 
 
 def next_month_end(ts: pd.Timestamp) -> pd.Timestamp:
     return (ts + pd.offsets.MonthEnd(1)).normalize()
+
+
+def assert_trading_cal_ready(df: pd.DataFrame) -> None:
+    """Ensure global TRADING_CAL is initialized from df['date']."""
+    global TRADING_CAL
+    if TRADING_CAL is None or len(TRADING_CAL) == 0:
+        set_trading_calendar_from_df(df)
+        print(f"[INFO] Trading calendar initialized: "
+              f"{TRADING_CAL[0].date()} ~ {TRADING_CAL[-1].date()} "
+              f"({len(TRADING_CAL)} days)")
+
+
+def _ensure_datetime_series(s: pd.Series) -> pd.Series:
+    """엑셀 date 컬럼을 확실히 datetime으로 변환 (문자열/일련번호 모두 지원)"""
+    s1 = pd.to_datetime(s, errors="coerce")  # 문자열/타임스탬프 케이스
+    # 만약 대부분 NaT면 엑셀 일련번호로 가정
+    if s1.isna().mean() > 0.8 and np.issubdtype(s.dtype, np.number):
+        s1 = pd.to_datetime(s.astype("float64"), unit="d",
+                            origin="1899-12-30", errors="coerce")
+    return s1.dt.tz_localize(None).dt.normalize()
 
 
 # --------------------- Feature Engineering ------------------- #
@@ -124,7 +172,8 @@ def load_and_engineer(data_path: str) -> pd.DataFrame:
         if "data" in xl.sheet_names:
             print(f"전처리된 엑셀 파일 로드: {data_path}")
             df = pd.read_excel(data_path, sheet_name="data")
-            
+            # df["date"] = _ensure_datetime_series(df["date"])
+
             # 빈 셀을 0으로 채움
             df["close"] = df["close"].fillna(0)
             df["volume"] = df["volume"].fillna(0)
@@ -144,7 +193,9 @@ def load_and_engineer(data_path: str) -> pd.DataFrame:
         # ('data' 시트가 있는데 특성이 없는 경우도 여기로 옴)
         print(f"원본 엑셀 파일 처리 중: {data_path}")
         df_price = pd.read_excel(data_path, sheet_name="price").fillna(0)
+        # df_price["date"] = _ensure_datetime_series(df_price["date"])
         df_volume = pd.read_excel(data_path, sheet_name="volume").fillna(0)
+        # df_volume["date"] = _ensure_datetime_series(df_volume["date"])
 
         # 날짜 컬럼 명 통일
         date_col = df_price.columns[0]
@@ -218,17 +269,23 @@ class WindowedSample:
 
 def group_data_by_symbol(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     """전처리된 데이터를 종목별로 분리하여 딕셔너리로 반환
-    
+
     Args:
         df: (date, symbol)을 PK로 하는 긴 형태 데이터프레임
-    
+
     Returns:
         {symbol: DataFrame} 형태의 딕셔너리
     """
     symbol_groups = {}
     for symbol in df["symbol"].unique():
         symbol_df = df[df["symbol"] == symbol].copy()
+        # 보정 추가
+        # symbol_df["date"] = _ensure_datetime_series(symbol_df["date"])
         symbol_df = symbol_df.set_index("date").sort_index()
+
+        # (선택) 강제 캐스팅으로 확실히 DatetimeIndex
+        symbol_df.index = pd.DatetimeIndex(symbol_df.index)
+
         symbol_groups[symbol] = symbol_df
     return symbol_groups
 
@@ -255,17 +312,33 @@ def extract_window_for_symbol(
         - returns: [T] 형태의 수익률 데이터
         - is_valid: 유효한 데이터인지 여부
     """
-    start = asof - pd.tseries.offsets.BDay(T - 1)
-    wdates = pd.bdate_range(start, asof)
-    
+    global TRADING_CAL
+    wdates = last_n_trading_days(asof, T, TRADING_CAL)
+    if wdates is None or len(wdates) != T:
+        if debug:
+            print(f"    [DEBUG] 캘린더 부족: asof={asof.date()}, T={T}")
+        return np.zeros((T, len(features)), np.float32), np.zeros((T,), np.float32), False
+
     if debug:
-        print(f"    [DEBUG] 윈도우 기간: {start.date()} ~ {asof.date()}")
-        print(f"    [DEBUG] 종목 데이터 date range: {symbol_df.index.min()} ~ {symbol_df.index.max()}")
+        w_start = wdates[0]
+        w_end = wdates[-1]
+        print(f"    [DEBUG] 윈도우 기간: {w_start.date()} ~ {w_end.date()}")
+        smin = symbol_df.index.min()
+        smax = symbol_df.index.max()
+        try:
+            print(f"    [DEBUG] 종목 데이터 date range: {smin.date()} ~ {smax.date()}")
+        except Exception:
+            print(f"    [DEBUG] 종목 데이터 date range: {smin} ~ {smax}")
         print(f"    [DEBUG] 필요한 날짜 수: {len(wdates)}, 종목 데이터 행 수: {len(symbol_df)}")
-    
+
     # 윈도우 데이터 추출
-    selected_df = symbol_df.reindex(wdates)[features]
-    
+    # Robust selection (index-agnostic): 'date'로 머지해서 정렬
+    win_df = pd.DataFrame({'date': pd.DatetimeIndex(wdates)})
+    sym_reset = symbol_df.reset_index()  # 'date'를 컬럼으로
+    cols = ['date'] + list(features)
+    sym_reset = sym_reset[cols]
+    selected_df = win_df.merge(sym_reset, on='date', how='left').set_index('date')
+
     # NaN 체크
     nan_rows = selected_df.isna().any(axis=1).sum()
     if nan_rows > 0:
@@ -1097,6 +1170,7 @@ def train_month_end_models(df: pd.DataFrame, asof: pd.Timestamp, save_dir: str =
     Returns mapping T -> model_path saved.
     """
     ensure_dirs()
+    assert_trading_cal_ready(df)
     
     # save_dir가 제공되면 해당 디렉토리 생성
     if save_dir is not None:
@@ -1178,6 +1252,7 @@ def predict_next_month(df: pd.DataFrame, asof: pd.Timestamp) -> pd.DataFrame:
     """Load models for the given asof, predict per T and ensemble, then export Excel."""
     ensure_dirs()
     symbols = sorted(df["symbol"].unique().tolist())
+    assert_trading_cal_ready(df)
 
     results: Dict[int, Dict[str, np.ndarray]] = {}
     
@@ -1282,8 +1357,8 @@ def train_and_predict_ensemble(df: pd.DataFrame, n_models: int = 5) -> pd.DataFr
     print("="*80)
     
     # 모든 월말 영업일 추출
-    all_dates = sorted(df["date"].unique())
-    month_ends = get_month_ends(all_dates)
+    assert_trading_cal_ready(df)
+    month_ends = get_month_ends(TRADING_CAL)
     
     if len(month_ends) < 2:
         raise ValueError("최소 2개 이상의 월말 영업일이 필요합니다.")
@@ -1450,27 +1525,27 @@ def main():
         description="Temporal GAT 월말 영업일 반복 학습/예측",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-사용 예시:
-  
-  # Ensemble 모드 (추천): 월말 영업일별 학습/예측 자동 실행
-  python temporal_gat_monthly_ensemble_pipeline.py --mode ensemble
-  
-  # Ensemble 모드 (모델 개수 지정)
-  python temporal_gat_monthly_ensemble_pipeline.py --mode ensemble --n-models 5
-  
-  # Ensemble 모드 (커스텀 데이터 파일)
-  python temporal_gat_monthly_ensemble_pipeline.py --mode ensemble --data preprocessed_data.xlsx
-  
-  # 학습 모드: 특정 날짜 기준 학습
-  python temporal_gat_monthly_ensemble_pipeline.py --mode train --asof 2021-04-30
-  
-  # 예측 모드: 특정 날짜 기준 예측
-  python temporal_gat_monthly_ensemble_pipeline.py --mode predict --asof 2021-04-30
-
-설명:
-  - ensemble: '2021-04-30'부터 자동으로 월말 영업일 기준 반복 학습/예측 수행
-  - train: 지정된 날짜 기준으로 모델 학습
-  - predict: 지정된 날짜 기준으로 예측 수행
+        사용 예시:
+          
+          # Ensemble 모드 (추천): 월말 영업일별 학습/예측 자동 실행
+          python temporal_gat_monthly_ensemble_pipeline_patched.py --mode ensemble
+          
+          # Ensemble 모드 (모델 개수 지정)
+          python temporal_gat_monthly_ensemble_pipeline_patched.py --mode ensemble --n-models 5
+          
+          # Ensemble 모드 (커스텀 데이터 파일)
+          python temporal_gat_monthly_ensemble_pipeline_patched.py --mode ensemble --data preprocessed_data.xlsx
+          
+          # 학습 모드: 특정 날짜 기준 학습
+          python temporal_gat_monthly_ensemble_pipeline_patched.py --mode train --asof 2021-04-30
+          
+          # 예측 모드: 특정 날짜 기준 예측
+          python temporal_gat_monthly_ensemble_pipeline_patched.py --mode predict --asof 2021-04-30
+        
+        설명:
+          - ensemble: '2021-04-30'부터 자동으로 월말 영업일 기준 반복 학습/예측 수행
+          - train: 지정된 날짜 기준으로 모델 학습
+          - predict: 지정된 날짜 기준으로 예측 수행
         """
     )
     parser.add_argument("--mode", choices=["train", "predict", "ensemble", "debug"], default="ensemble",
