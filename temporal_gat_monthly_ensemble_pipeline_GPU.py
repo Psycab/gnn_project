@@ -460,7 +460,7 @@ def make_model(T: int, seed: int) -> TemporalGATWrapper:
 def train_month_end_models(df: pd.DataFrame, asof: pd.Timestamp, save_dir: str, model_idx: int,
                            n_models: int = 5) -> Dict[int, List[str]]:
     """Train n_models seeds for each T in WINDOWS and save all. Returns map T->list of paths."""
-    ensure_dirs()
+    # save_dir은 이미 results/{run_tag}/models/{날짜} 구조로 전달됨
     os.makedirs(save_dir, exist_ok=True)
 
     symbols = sorted(df["symbol"].unique().tolist())

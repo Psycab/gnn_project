@@ -1,0 +1,23 @@
+{
+  "asof": "2023-10-31",
+  "T": 20,
+  "seed": 31001,
+  "features": [
+    "log_return",
+    "vol_z",
+    "volatility20",
+    "mom20"
+  ],
+  "hidden_dim": 64,
+  "num_layers": 2,
+  "num_heads": 4,
+  "gat_dropout": 0.3,
+  "neg_slope": 0.2,
+  "gru_layers": 1,
+  "gru_dropout": 0.0,
+  "corr_threshold": 0.3,
+  "k_neighbors": 3,
+  "mutual_topk": true,
+  "drop_edge_rate": 0.15,
+  "num_features_": 12
+}
